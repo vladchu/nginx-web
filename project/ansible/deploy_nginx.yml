@@ -1,0 +1,14 @@
+- hosts: web
+  become: yes
+  tasks:
+    - name: Clone GitHub repo
+      git:
+        repo: "https://github.com/vladchu/nginx-web.git"
+        dest: /home/ubuntu/nginx-web
+        version: main
+        force: yes
+
+    - name: Run Docker Compose
+      shell: |
+        cd /home/ubuntu/nginx-web/project/nginx
+        docker compose up -d

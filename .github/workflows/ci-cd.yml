@@ -1,0 +1,99 @@
+name: Auto create and up Nginx
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Init
+        working-directory: project/terraform
+        run: terraform init
+
+      - name: Terraform Apply
+        working-directory: project/terraform
+        run: terraform apply -auto-approve
+
+      - name: Get Server IP
+        id: tf
+        working-directory: project/terraform
+        run: |
+          IP=$(terraform output -raw public_ip 2>&1 | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+          echo "Server IP: $IP"
+          echo "web_ip=$IP" >> $GITHUB_OUTPUT
+          echo "SERVER_IP=$IP" >> $GITHUB_ENV
+
+      - name: Install Ansible
+        run: sudo apt update && sudo apt install -y ansible sshpass
+
+      - name: Create SSH key
+        working-directory: project/ansible
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > temp_key
+          chmod 600 temp_key
+
+      - name: Set INVENTORY_FILE
+        run: echo "INVENTORY_FILE=inventory.ini" >> $GITHUB_ENV
+
+      - name: Create inventory
+        working-directory: project/ansible
+        run: |
+          IP="${{ steps.tf.outputs.web_ip }}"
+          if [ -z "$IP" ]; then
+            IP="$SERVER_IP"
+          fi
+          cat > inventory.ini <<EOL
+          [web]
+          ${IP} ansible_user=ubuntu ansible_ssh_private_key_file=temp_key ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          EOL
+          echo "Created inventory with IP: $IP"
+
+      - name: CHECK INVENT FILE
+        working-directory: project/ansible
+        run: |
+          echo "Checking inventory file:"
+          cat inventory.ini
+          echo "===========----------========"
+          echo "IP from outputs: ${{ steps.tf.outputs.web_ip }}"
+          echo "IP from env: $SERVER_IP"
+          ls -la
+      
+      - name: Wait 15 sec 
+        run: sleep 15
+
+      - name: Run Ansible playbook Install Docker
+        working-directory: project/ansible
+        run: ansible-playbook -i inventory.ini install_docker.yml
+
+      - name: Run Ansible playbook Deploy Nginx
+        working-directory: project/ansible
+        run: ansible-playbook -i inventory.ini deploy_nginx.yml
+
+      - name: Cleanup SSH key
+        working-directory: project/ansible
+        run: rm -f temp_key
+
+      - name: Wait 15 minutes before destroy
+        run: sleep 900
+
+      - name: Terraform Destroy
+        working-directory: project/terraform
+        run: terraform destroy -auto-approve
